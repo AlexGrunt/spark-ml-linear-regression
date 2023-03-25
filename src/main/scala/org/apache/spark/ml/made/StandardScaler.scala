@@ -1,17 +1,15 @@
 package org.apache.spark.ml.made
 
-import org.apache.spark.ml.attribute.AttributeGroup
 import org.apache.spark.ml.linalg.{DenseVector, Vector, VectorUDT, Vectors}
-import org.apache.spark.ml.param.{BooleanParam, Param, ParamMap}
 import org.apache.spark.ml.param.shared.{HasInputCol, HasOutputCol}
-import org.apache.spark.ml.stat.Summarizer
+import org.apache.spark.ml.param.{BooleanParam, ParamMap}
 import org.apache.spark.ml.util._
 import org.apache.spark.ml.{Estimator, Model}
 import org.apache.spark.mllib
 import org.apache.spark.mllib.stat.MultivariateOnlineSummarizer
 import org.apache.spark.sql.catalyst.encoders.ExpressionEncoder
 import org.apache.spark.sql.types.StructType
-import org.apache.spark.sql.{DataFrame, Dataset, Encoder, Row}
+import org.apache.spark.sql.{DataFrame, Dataset, Encoder}
 
 trait StandardScalerParams extends HasInputCol with HasOutputCol {
   def setInputCol(value: String) : this.type = set(inputCol, value)
@@ -48,10 +46,6 @@ with DefaultParamsWritable {
     implicit val encoder : Encoder[Vector] = ExpressionEncoder()
 
     val vectors: Dataset[Vector] = dataset.select(dataset($(inputCol)).as[Vector])
-
-    val dim: Int = AttributeGroup.fromStructField((dataset.schema($(inputCol)))).numAttributes.getOrElse(
-      vectors.first().size
-    )
 
     val summary: MultivariateOnlineSummarizer = vectors.rdd.mapPartitions((data: Iterator[Vector]) => {
       val result = data.foldLeft(new MultivariateOnlineSummarizer())(
@@ -101,7 +95,7 @@ class StandardScalerModel private[made](
     } else {
       dataset.sqlContext.udf.register(uid + "_transform",
         (x : Vector) => {
-          Vectors.fromBreeze((x.asBreeze) /:/ bStds)
+          Vectors.fromBreeze(x.asBreeze /:/ bStds)
         })
     }
 

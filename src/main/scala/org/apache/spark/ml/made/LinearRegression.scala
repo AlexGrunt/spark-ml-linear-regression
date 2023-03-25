@@ -1,20 +1,16 @@
 package org.apache.spark.ml.made
 
+import breeze.stats.distributions.Gaussian
 import breeze.{linalg => l}
 import org.apache.spark.ml.attribute.AttributeGroup
-import breeze.stats.distributions.Gaussian
-import org.apache.spark.ml.linalg.{DenseVector, SparseVector, Vector, VectorUDT, Vectors}
-import org.apache.spark.ml.param.{DoubleParam, IntParam, Param, ParamMap}
+import org.apache.spark.ml.linalg.{Vector, VectorUDT, Vectors}
 import org.apache.spark.ml.param.shared.{HasInputCol, HasOutputCol}
-import org.apache.spark.ml.regression.LinearRegressionModel
-import org.apache.spark.ml.stat.Summarizer
+import org.apache.spark.ml.param.{DoubleParam, IntParam, ParamMap}
 import org.apache.spark.ml.util._
 import org.apache.spark.ml.{Estimator, Model}
-import org.apache.spark.mllib
-import org.apache.spark.mllib.stat.MultivariateOnlineSummarizer
 import org.apache.spark.sql.catalyst.encoders.ExpressionEncoder
 import org.apache.spark.sql.types.StructType
-import org.apache.spark.sql.{DataFrame, Dataset, Encoder, Row, SparkSession}
+import org.apache.spark.sql.{DataFrame, Dataset, Encoder}
 
 
 trait LinearRegressionParams extends HasInputCol with HasOutputCol {
@@ -69,7 +65,7 @@ class LinearRegression(override val uid: String) extends Estimator[LinearRegress
     implicit val encoder: Encoder[Vector] = ExpressionEncoder()
     val vectors: Dataset[Vector] = dataset.select(dataset($(inputCol)).as[Vector])
 
-    val dim: Int = AttributeGroup.fromStructField((dataset.schema($(inputCol)))).numAttributes.getOrElse(
+    val dim: Int = AttributeGroup.fromStructField(dataset.schema($(inputCol))).numAttributes.getOrElse(
       vectors.first().size
     )
 
@@ -96,17 +92,50 @@ class LinearRegression(override val uid: String) extends Estimator[LinearRegress
   override def transformSchema(schema: StructType): StructType = validateAndTransformSchema(schema)
 }
 
+object LinearRegression extends DefaultParamsReadable[LinearRegression]
+
 
 class LinearRegressionModel private[made](override val uid: String,
                                           val weights: Vector) extends Model[LinearRegressionModel] with LinearRegressionParams with MLWritable {
   private[made] def this(weights: Vector) =
     this(Identifiable.randomUID("LinRegModel"), weights)
 
-  override def copy(extra: ParamMap): LinearRegressionModel = ???
+  override def copy(extra: ParamMap): LinearRegressionModel = copyValues(new LinearRegressionModel(weights), extra)
 
-  override def write: MLWriter = ???
+  override def write: MLWriter = new DefaultParamsWriter(this) {
+    override protected def saveImpl(path: String): Unit = {
+      super.saveImpl(path)
+      sqlContext.createDataFrame(Seq(Tuple1(weights))).write.parquet(path + "/weights")
+    }
+  }
 
-  override def transform(dataset: Dataset[_]): DataFrame = ???
+  override def transform(dataset: Dataset[_]): DataFrame = {
+    val bias = weights.asBreeze(-1)
+    val weightsBreeze = weights.asBreeze(1 until weights.size - 1)
 
-  override def transformSchema(schema: StructType): StructType = ???
+    val transformUdf = {
+      dataset.sqlContext.udf.register(uid + "_transform",
+        (x: Vector) => bias + x.asBreeze.dot(weightsBreeze)
+      )
+    }
+
+    dataset.withColumn($(outputCol), transformUdf(dataset($(inputCol))))
+  }
+
+  override def transformSchema(schema: StructType): StructType = validateAndTransformSchema(schema)
+}
+
+object LinearRegressionModel extends MLReadable[LinearRegressionModel] {
+  override def read: MLReader[LinearRegressionModel] = new MLReader[LinearRegressionModel] {
+    override def load(path: String): LinearRegressionModel = {
+      val metadata = DefaultParamsReader.loadMetadata(path, sc)
+      val vectors = sqlContext.read.parquet(path + "/weights")
+      implicit val encoder: Encoder[Vector] = ExpressionEncoder()
+      val weights = vectors.select(vectors("_1").as[Vector]).first()
+
+      val model = new LinearRegressionModel(weights)
+      metadata.getAndSetParams(model)
+      model
+    }
+  }
 }
