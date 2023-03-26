@@ -3,14 +3,18 @@ package org.apache.spark.ml.made
 import breeze.stats.distributions.Gaussian
 import breeze.{linalg => l}
 import org.apache.spark.ml.attribute.AttributeGroup
+import org.apache.spark.ml.feature.VectorAssembler
 import org.apache.spark.ml.linalg.{Vector, VectorUDT, Vectors}
 import org.apache.spark.ml.param.shared.{HasInputCol, HasOutputCol}
 import org.apache.spark.ml.param.{DoubleParam, IntParam, ParamMap}
 import org.apache.spark.ml.util._
 import org.apache.spark.ml.{Estimator, Model}
+import org.apache.spark.mllib
+import org.apache.spark.mllib.stat.MultivariateOnlineSummarizer
 import org.apache.spark.sql.catalyst.encoders.ExpressionEncoder
+import org.apache.spark.sql.functions.lit
 import org.apache.spark.sql.types.StructType
-import org.apache.spark.sql.{DataFrame, Dataset, Encoder}
+import org.apache.spark.sql.{DataFrame, Dataset, Encoder, Row}
 
 
 trait LinearRegressionParams extends HasInputCol with HasOutputCol {
@@ -32,7 +36,7 @@ trait LinearRegressionParams extends HasInputCol with HasOutputCol {
   def getMaxIterations: Int = $(maxIterations)
 
   setDefault(maxIterations -> 1000)
-  setDefault(learningRate -> 0.01)
+  setDefault(learningRate -> 1.0)
 
   protected def validateAndTransformSchema(schema: StructType): StructType = {
     SchemaUtils.checkColumnType(schema, getInputCol, new VectorUDT())
@@ -50,41 +54,40 @@ class LinearRegression(override val uid: String) extends Estimator[LinearRegress
   with DefaultParamsWritable {
   def this() = this(Identifiable.randomUID("linearRegression"))
 
-  private def gradStep(data: Vector, weights: l.DenseVector[Double], bias: Double):
-  (l.DenseVector[Double], Double) = {
-    val features = data.asBreeze(0 to data.size)
-    val target = data.asBreeze(-1)
-
-    val error = target - ((features dot weights) + bias)
-    val weightsGrad = -2.0 * features.toDenseVector * error
-    val biasGrad = -2.0 * bias
-    (weightsGrad, biasGrad)
-  }
-
   override def fit(dataset: Dataset[_]): LinearRegressionModel = {
     implicit val encoder: Encoder[Vector] = ExpressionEncoder()
-    val vectors: Dataset[Vector] = dataset.select(dataset($(inputCol)).as[Vector])
+
+    val assembler: VectorAssembler = new VectorAssembler()
+      .setInputCols(Array($(inputCol), "ones", $(outputCol)))
+      .setOutputCol("features_target")
+
+    val vectors: Dataset[Vector] = assembler
+      .transform(dataset.withColumn("ones", lit(1)))
+      .select("features_target")
+      .as[Vector]
 
     val dim: Int = AttributeGroup.fromStructField(dataset.schema($(inputCol))).numAttributes.getOrElse(
       vectors.first().size
     )
 
-    val weights: l.DenseVector[Double] = l.DenseVector.rand[Double](dim - 1, Gaussian(0, 1))
-    var bias: Double = 0
+    var weights: l.DenseVector[Double] = l.DenseVector.rand[Double](dim - 1, Gaussian(0, 1))
 
-    for (_ <- 0 to getMaxIterations) {
-      val vectorsRdd = vectors.rdd
-      val weightsRdd = vectorsRdd.sparkContext.broadcast(weights)
+    for (_ <- 0 until getMaxIterations) {
+      val summary = vectors.rdd.mapPartitions((data: Iterator[Vector]) => {
+        val summarizer= new MultivariateOnlineSummarizer()
+        data.foreach(v => {
+          val X = v.asBreeze(0 until weights.size).toDenseVector
+          val y = v.asBreeze(weights.size)
+          val grad = X * (l.sum(X * weights) - y)
+          summarizer.add(mllib.linalg.Vectors.fromBreeze(grad))
+        })
+        Iterator(summarizer)
+      }).reduce(_ merge _)
 
-      val (weightsGrad, biasGrad) = vectorsRdd
-        .map(data => gradStep(data, weightsRdd.value, bias))
-        .reduce((gradsL, gradsR) => (gradsL._1 + gradsR._1, gradsL._2 + gradsR._2))
-
-      weights -= weightsGrad * (getLearningRate / vectorsRdd.count())
-      bias -= biasGrad * (getLearningRate / vectorsRdd.count())
+      weights = weights - getLearningRate * summary.mean.asBreeze
     }
-    val result = l.DenseVector.vertcat(weights, l.DenseVector[Double](bias))
-    copyValues(new LinearRegressionModel(Vectors.fromBreeze(result))).setParent(this)
+
+    copyValues(new LinearRegressionModel(Vectors.fromBreeze(weights))).setParent(this)
   }
 
   override def copy(extra: ParamMap): Estimator[LinearRegressionModel] = defaultCopy(extra)
@@ -111,7 +114,7 @@ class LinearRegressionModel private[made](override val uid: String,
 
   override def transform(dataset: Dataset[_]): DataFrame = {
     val bias = weights.asBreeze(-1)
-    val weightsBreeze = weights.asBreeze(1 until weights.size - 1)
+    val weightsBreeze = weights.asBreeze(0 until weights.size - 1)
 
     val transformUdf = {
       dataset.sqlContext.udf.register(uid + "_transform",
