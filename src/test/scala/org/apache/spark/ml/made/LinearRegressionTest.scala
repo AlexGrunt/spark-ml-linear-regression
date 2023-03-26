@@ -58,7 +58,7 @@ class LinearRegressionTest extends AnyFlatSpec with should.Matchers with WithSpa
       .stages(0)
       .asInstanceOf[LinearRegressionModel]
 
-    model.weights should be (weights.size + 1)
+    model.weights should be(weights.size + 1)
     model.weights(0) should be(weights(0) +- delta)
     model.weights(1) should be(weights(0) +- delta)
     model.weights(2) should be(weights(0) +- delta)
@@ -83,9 +83,9 @@ class LinearRegressionTest extends AnyFlatSpec with should.Matchers with WithSpa
   private def validateModel(model: LinearRegressionModel, df: DataFrame): Unit = {
     val vectors: Array[Double] = df.collect().map(_.getAs[Double](1))
 
-    vectors.length should be (100000)
+    vectors.length should be(100000)
     for (i <- vectors.indices)
-      vectors(i) should be (y(i) +- delta)
+      vectors(i) should be(y(i) +- delta)
   }
 }
 
