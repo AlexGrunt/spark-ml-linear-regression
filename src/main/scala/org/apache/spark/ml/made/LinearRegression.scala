@@ -14,7 +14,7 @@ import org.apache.spark.mllib.stat.MultivariateOnlineSummarizer
 import org.apache.spark.sql.catalyst.encoders.ExpressionEncoder
 import org.apache.spark.sql.functions.lit
 import org.apache.spark.sql.types.StructType
-import org.apache.spark.sql.{DataFrame, Dataset, Encoder, Row}
+import org.apache.spark.sql.{DataFrame, Dataset, Encoder}
 
 
 trait LinearRegressionParams extends HasInputCol with HasOutputCol {
@@ -74,7 +74,7 @@ class LinearRegression(override val uid: String) extends Estimator[LinearRegress
 
     for (_ <- 0 until getMaxIterations) {
       val summary = vectors.rdd.mapPartitions((data: Iterator[Vector]) => {
-        val summarizer= new MultivariateOnlineSummarizer()
+        val summarizer = new MultivariateOnlineSummarizer()
         data.foreach(v => {
           val X = v.asBreeze(0 until weights.size).toDenseVector
           val y = v.asBreeze(weights.size)
