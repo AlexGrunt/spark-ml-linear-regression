@@ -87,11 +87,6 @@ class LinearRegressionTest extends AnyFlatSpec with should.Matchers with WithSpa
     for (i <- vectors.indices)
       vectors(i) should be (y(i) +- delta)
   }
-
-  "Model" should "work after re-read" in {
-
-  }
-
 }
 
 object LinearRegressionTest extends WithSpark {
